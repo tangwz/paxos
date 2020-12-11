@@ -65,7 +65,12 @@ func (p *proposer) prepare() []message {
 	i := 0
 
 	for to := range p.acceptors {
-		msg[i] = message{from: p.id, to: to, tp: Prepare, number: p.number}
+		msg[i] = message{
+			tp:     Prepare,
+			from:   p.id,
+			to:     to,
+			number: p.number,
+		}
 		i++
 		if i == p.majority() {
 			break
@@ -92,7 +97,13 @@ func (p *proposer) accept() []message {
 	i := 0
 	for to, ok := range p.acceptors {
 		if ok {
-			msg[i] = message{from: p.id, to: to, tp: Propose, number: p.number, value: p.value}
+			msg[i] = message{
+				tp:     Propose,
+				from:   p.id,
+				to:     to,
+				number: p.number,
+				value:  p.value,
+			}
 			i++
 		}
 
