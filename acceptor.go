@@ -1,91 +1,94 @@
 package paxos
 
 import (
+	"fmt"
 	"log"
-	"time"
+	"net"
+	"net/rpc"
 )
 
-type acceptor struct {
-	// server id
+type Acceptor struct {
+	lis  net.Listener
+	// 服务器 id
 	id int
-	// the number of the proposal this server will accept, or 0 if it has never received a Prepare request
+	// 接受者承诺的提案编号，如果为 0 表示接受者没有收到过任何 Prepare 消息
 	promiseNumber int
-	// the number of the last proposal the server has accepted, or 0 if it never accepted any.
+	// 接受者已接受的提案编号，如果为 0 表示没有接受任何提案
 	acceptedNumber int
-	// the value from the most recent proposal the server has accepted, or null if it has never accepted a proposal
-	acceptedValue string
+	// 接受者已接受的提案的值，如果没有接受任何提案则为 nil
+	acceptedValue interface{}
 
+	// 学习者 id 列表
 	learners []int
-	net      network
 }
 
-func newAcceptor(id int, net network, learners ...int) *acceptor {
-	return &acceptor{id: id, net: net, acceptedNumber: 0, acceptedValue: "", learners: learners}
+func newAcceptor(id int, learners []int) *Acceptor {
+	acceptor := &Acceptor{
+		id: id,
+		learners: learners,
+	}
+	acceptor.server()
+	return acceptor
 }
 
-func (a *acceptor) run() {
-	log.Printf("acceptor %d run", a.id)
-	for {
-		msg, ok := a.net.recv(time.Hour)
-		if !ok {
-			continue
-		}
-		switch msg.tp {
-		case Prepare:
-			promise, ok := a.handlePrepare(msg)
-			if ok {
-				a.net.send(promise)
-			}
-		case Propose:
-			proposalAccepted := a.handleAccept(msg)
-			if proposalAccepted {
-				for _, l := range a.learners {
-					msg := message{
-						tp:     Accept,
-						from:   a.id,
-						to:     l,
-						number: a.acceptedNumber,
-						value:  a.acceptedValue,
-					}
-					a.net.send(msg)
+func (a *Acceptor) Prepare(args *MsgArgs, reply *MsgReply) error {
+	if args.Number > a.promiseNumber {
+		a.promiseNumber = args.Number
+		reply.Number = a.acceptedNumber
+		reply.Value = a.acceptedValue
+		reply.Ok = true
+	} else {
+		reply.Ok = false
+	}
+	return nil
+}
+
+func (a *Acceptor) Accept(args *MsgArgs, reply *MsgReply) error {
+	if args.Number >= a.promiseNumber {
+		a.promiseNumber = args.Number
+		a.acceptedNumber = args.Number
+		a.acceptedValue = args.Value
+		reply.Ok = true
+		// 后台转发接受的提案给学习者
+		for _, lid := range a.learners {
+			go func(learner int) {
+				addr := fmt.Sprintf("127.0.0.1:%d", learner)
+				args.From = a.id
+				args.To = learner
+				resp := new(MsgReply)
+				ok := call(addr, "Learner.Learn", args, resp)
+				if !ok {
+					return
 				}
-			}
-		default:
-			log.Panicf("acceptor: %d unexpected message type: %v", a.id, msg.tp)
+			}(lid)
 		}
+	} else {
+		reply.Ok = false
 	}
+	return nil
 }
 
-// Phase 1. (b) If an acceptor receives a prepare request with number n greater than that of
-// any prepare request to which it has already responded, then it responds to the request
-// with a promise not to accept any more proposals numbered less than n and with
-// the highest-numbered proposal (if any) that it has accepted.
-func (a *acceptor) handlePrepare(args message) (message, bool) {
-	if a.promiseNumber >= args.number {
-		return message{}, false
+func (a *Acceptor) server()  {
+	rpcs := rpc.NewServer()
+	rpcs.Register(a)
+	addr := fmt.Sprintf(":%d", a.id)
+	l, e := net.Listen("tcp", addr)
+	if e != nil {
+		log.Fatal("listen error:", e)
 	}
-	a.promiseNumber = args.number
-	msg := message{
-		tp:     Promise,
-		from:   a.id,
-		to:     args.from,
-		number: a.acceptedNumber,
-		value:  a.acceptedValue,
-	}
-	return msg, true
+	a.lis = l
+	go func() {
+		for {
+			conn, err := a.lis.Accept()
+			if err != nil {
+				continue
+			}
+			go rpcs.ServeConn(conn)
+		}
+	}()
 }
 
-// Phase 2. (b) If an acceptor receives an accept request for a proposal numbered n,
-// it accepts the proposal unless it has already responded to a prepare request
-// having a number greater than n.
-func (a *acceptor) handleAccept(args message) bool {
-	number := args.number
-	if number >= a.promiseNumber {
-		a.acceptedNumber = number
-		a.acceptedValue = args.value
-		a.promiseNumber = number
-		return true
-	}
-
-	return false
+// 关闭连接
+func (a *Acceptor) close() {
+	a.lis.Close()
 }

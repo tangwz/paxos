@@ -1,72 +1,90 @@
 package paxos
 
 import (
+	"fmt"
 	"log"
-	"time"
+	"net"
+	"net/rpc"
 )
 
-type learner struct {
+type Learner struct {
+	lis net.Listener
+	// 学习者 id
 	id        int
-	acceptors map[int]message
-
-	net network
+	// 记录接受者已接受的提案：[接受者 id]请求消息
+	acceptedMsg map[int]MsgArgs
 }
 
-func newLearner(id int, net network, acceptors ...int) *learner {
-	l := &learner{id: id, net: net, acceptors: make(map[int]message)}
-	for _, a := range acceptors {
-		l.acceptors[a] = message{tp: Accept}
+func newLearner(id int, acceptorIds []int) *Learner {
+	learner := &Learner{
+		id: id,
+		acceptedMsg: make(map[int]MsgArgs),
 	}
-	return l
-}
-
-func (l *learner) learn() string {
-	for {
-		msg, ok := l.net.recv(time.Hour)
-		if !ok {
-			continue
+	for _, aid := range acceptorIds {
+		learner.acceptedMsg[aid] = MsgArgs{
+			Number: 0,
+			Value:  nil,
 		}
-		if msg.tp != Accept {
-			log.Panicf("learner: %d receivd unexpected message %+v", l.id, msg)
-		}
-		l.handleAccepted(msg)
-		accept, ok := l.chosen()
-		if !ok {
-			continue
-		}
-		return accept.value
 	}
+	learner.server(id)
+	return learner
 }
 
-func (l *learner) handleAccepted(args message) {
-	a := l.acceptors[args.from]
-	if a.number < args.number {
-		log.Printf("learner: %d received a new accepted proposal %+v", l.id, args)
-		l.acceptors[args.from] = args
+func (l *Learner) Learn(args *MsgArgs, reply *MsgReply) error {
+	a := l.acceptedMsg[args.From]
+	if a.Number < args.Number {
+		l.acceptedMsg[args.From] = *args
+		reply.Ok = true
+	} else {
+		reply.Ok = false
 	}
+	return nil
 }
 
-func (l *learner) majority() int {
-	return len(l.acceptors)/2 + 1
-}
-
-// To learn that a value has been chosen, a learner must find out that
-// a proposal has been accepted by a majority of acceptors.
-func (l *learner) chosen() (message, bool) {
+func (l *Learner) chosen() interface{} {
 	acceptCounts := make(map[int]int)
-	acceptMsg := make(map[int]message)
+	acceptMsg := make(map[int]MsgArgs)
 
-	for _, accepted := range l.acceptors {
-		if accepted.number != 0 {
-			acceptCounts[accepted.number]++
-			acceptMsg[accepted.number] = accepted
+	for _, accepted := range l.acceptedMsg {
+		if accepted.Number != 0 {
+			acceptCounts[accepted.Number]++
+			acceptMsg[accepted.Number] = accepted
 		}
 	}
 
 	for n, count := range acceptCounts {
 		if count >= l.majority() {
-			return acceptMsg[n], true
+			return acceptMsg[n].Value
 		}
 	}
-	return message{}, false
+	return nil
+}
+
+func (l *Learner) majority() int {
+	return len(l.acceptedMsg)/2 + 1
+}
+
+func (l *Learner) server(id int) {
+	rpcs := rpc.NewServer()
+	rpcs.Register(l)
+	addr := fmt.Sprintf(":%d", id)
+	lis, e := net.Listen("tcp", addr)
+	if e != nil {
+		log.Fatal("listen error:", e)
+	}
+	l.lis = lis
+	go func() {
+		for {
+			conn, err := l.lis.Accept()
+			if err != nil {
+				continue
+			}
+			go rpcs.ServeConn(conn)
+		}
+	}()
+}
+
+// 关闭连接
+func (l *Learner) close() {
+	l.lis.Close()
 }

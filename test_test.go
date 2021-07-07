@@ -2,57 +2,89 @@ package paxos
 
 import (
 	"testing"
-	"time"
 )
 
-func TestSingleProposer(t *testing.T) {
-	// 1, 2, 3 are acceptors
-	// 1001 is a proposer
-	nt := newNetwork(1, 2, 3, 1001, 2001)
-
-	acceptors := make([]*acceptor, 0)
-	for i := 1; i <= 3; i++ {
-		acceptors = append(acceptors, newAcceptor(i, nt.nodeNetwork(i), 2001))
+// 启动接受者和学习者 RPC 服务
+func start(acceptorIds []int, learnerIds []int) ([]*Acceptor, []*Learner) {
+	acceptors := make([]*Acceptor, 0)
+	for _, aid := range acceptorIds {
+		a := newAcceptor(aid, learnerIds)
+		acceptors = append(acceptors, a)
 	}
+	
+	learners := make([]*Learner, 0)
+	for _, lid := range learnerIds {
+		l := newLearner(lid, acceptorIds)
+		learners = append(learners, l)
+	}
+	
+	return acceptors, learners
+}
 
+func cleanup(acceptors []*Acceptor, learners []*Learner) {
 	for _, a := range acceptors {
-		go a.run()
+		a.close()
 	}
+	
+	for _, l := range learners {
+		l.close()
+	}
+}
 
-	p := newProposer(1001, "hello world", nt.nodeNetwork(1001), 1, 2, 3)
-	go p.run()
+func TestSingleProposer(t *testing.T) {
+	// 1001, 1002, 1003 是接受者 id
+	acceptorIds := []int{1001, 1002, 1003}
+	// 2001 是学习者 id
+	learnerIds := []int{2001}
+	acceptors, learns := start(acceptorIds, learnerIds)
+	
+	defer cleanup(acceptors, learns)
 
-	l := newLearner(2001, nt.nodeNetwork(2001), 1, 2, 3)
-	value := l.learn()
+	// 1 是提议者 id
+	p := &Proposer{
+		id:        1,
+		acceptors: acceptorIds,
+	}
+	
+	value := p.propose("hello world")
 	if value != "hello world" {
 		t.Errorf("value = %s, excepted %s", value, "hello world")
+	}
+	
+	learnValue := learns[0].chosen()
+	if learnValue != value {
+		t.Errorf("learnValue = %s, excepted %s", learnValue, "hello world")
 	}
 }
 
 func TestTwoProposers(t *testing.T) {
-	// 1, 2, 3 are acceptors
-	// 1001,1002 is a proposer
-	nt := newNetwork(1, 2, 3, 1001, 1002, 2001)
+	// 1001, 1002, 1003 是接受者 id
+	acceptorIds := []int{1001, 1002, 1003}
+	// 2001 是学习者 id
+	learnerIds := []int{2001}
+	acceptors, learns := start(acceptorIds, learnerIds)
 
-	as := make([]*acceptor, 0)
-	for i := 1; i <= 3; i++ {
-		as = append(as, newAcceptor(i, nt.nodeNetwork(i), 2001))
+	defer cleanup(acceptors, learns)
+
+	// 1, 2 是提议者 id
+	p1 := &Proposer{
+		id:        1,
+		acceptors: acceptorIds,
 	}
-
-	for _, a := range as {
-		go a.run()
+	v1 := p1.propose("hello world")
+	
+	p2 := &Proposer{
+		id:        2,
+		acceptors: acceptorIds,
 	}
-
-	p1 := newProposer(1001, "hello world", nt.nodeNetwork(1001), 1, 2, 3)
-	go p1.run()
-
-	time.Sleep(time.Millisecond)
-	p2 := newProposer(1002, "bad day", nt.nodeNetwork(1002), 1, 2, 3)
-	go p2.run()
-
-	l := newLearner(2001, nt.nodeNetwork(2001), 1, 2, 3)
-	value := l.learn()
-	if value != "hello world" {
-		t.Errorf("value = %s, want %s", value, "hello world")
+	v2 := p2.propose("hello book")
+	
+	if v1 != v2 {
+		t.Errorf("value1 = %s, value2 = %s", v1, v2)
+	}
+	
+	learnValue := learns[0].chosen()
+	if learnValue != v1 {
+		t.Errorf("learnValue = %s, excepted %s", learnValue, v1)
 	}
 }

@@ -1,137 +1,84 @@
 package paxos
 
-import (
-	"log"
-	"time"
-)
+import "fmt"
 
-type proposer struct {
-	// server id
+type Proposer struct {
+	// 服务器 id
 	id int
-	// the largest round number the server has seen
+	// 当前提议者已知的最大轮次
 	round int
-	// proposal number = (round number, serverID)
+	// 提案编号 = (轮次, 服务器 id)
 	number int
-	// proposal value
-	value     string
-	acceptors map[int]bool
-	net       network
+	// 接受者 id 列表
+	acceptors []int
 }
 
-func newProposer(id int, value string, net network, acceptors ...int) *proposer {
-	p := &proposer{id: id, round: 0, value: value, net: net, acceptors: make(map[int]bool, len(acceptors))}
-	for _, acceptor := range acceptors {
-		p.acceptors[acceptor] = false
-	}
-	return p
-}
-
-func (p *proposer) run() {
-	var ok bool
-	var msg message
-	for !p.majorityReached() {
-		if !ok {
-			prepareMsg := p.prepare()
-			for i := range prepareMsg {
-				p.net.send(prepareMsg[i])
-			}
-		}
-
-		msg, ok = p.net.recv(time.Second)
-		if !ok {
-			continue
-		}
-
-		switch msg.tp {
-		case Promise:
-			p.handlePromise(msg)
-		default:
-			panic("UnSupport message.")
-		}
-	}
-
-	proposeMsg := p.accept()
-	for _, msg := range proposeMsg {
-		p.net.send(msg)
-	}
-}
-
-// Phase 1. (a) A proposer selects a proposal number n
-// and sends a prepare request with number n to a majority of acceptors.
-func (p *proposer) prepare() []message {
+func (p *Proposer) propose(v interface{}) interface{} {
 	p.round++
 	p.number = p.proposalNumber()
-	msg := make([]message, p.majority())
-	i := 0
 
-	for to := range p.acceptors {
-		msg[i] = message{
-			tp:     Prepare,
-			from:   p.id,
-			to:     to,
-			number: p.number,
+	// 第一阶段(phase 1)
+	prepareCount := 0
+	maxNumber := 0
+	for _, aid := range p.acceptors {
+		args := MsgArgs{
+			Number: p.number,
+			From:   p.id,
+			To:     aid,
 		}
-		i++
-		if i == p.majority() {
-			break
+		reply := new(MsgReply)
+		err := call(fmt.Sprintf("127.0.0.1:%d", aid), "Acceptor.Prepare", args, reply)
+		if !err {
+			continue
 		}
-	}
-	return msg
-}
-
-func (p *proposer) handlePromise(reply message) {
-	log.Printf("proposer: %d received a promise %+v", p.id, reply)
-	p.acceptors[reply.from] = true
-	if reply.number > 0 {
-		p.number = reply.number
-		p.value = reply.value
-	}
-}
-
-// Phase 2. (a) If the proposer receives a response to its prepare requests (numbered n)
-// from a majority of acceptors, then it sends an accept request to each of those acceptors
-// for a proposal numbered n with a value v, where v is the value of the highest-numbered proposal
-// among the responses, or is any value if the responses reported no proposals.
-func (p *proposer) accept() []message {
-	msg := make([]message, p.majority())
-	i := 0
-	for to, ok := range p.acceptors {
-		if ok {
-			msg[i] = message{
-				tp:     Propose,
-				from:   p.id,
-				to:     to,
-				number: p.number,
-				value:  p.value,
+		
+		if reply.Ok {
+			prepareCount++
+			if reply.Number > maxNumber {
+				maxNumber = reply.Number
+				v = reply.Value
 			}
-			i++
 		}
-
-		if i == p.majority() {
+		
+		if prepareCount == p.majority() {
 			break
 		}
 	}
-	return msg
+
+	// 第二阶段(phase 2)
+	acceptCount := 0
+	if prepareCount >= p.majority() {
+		for _, aid := range p.acceptors {
+			args := MsgArgs{
+				Number: p.number,
+				Value: v,
+				From: p.id,
+				To: aid,
+			}
+			reply := new(MsgReply)
+			ok := call(fmt.Sprintf("127.0.0.1:%d", aid), "Acceptor.Accept", args, reply)
+			if !ok {
+				continue
+			}
+			
+			if reply.Ok {
+				acceptCount++
+			}
+		}
+	}
+	
+	if acceptCount >= p.majority() {
+		// 选择的提案的值
+		return v
+	}
+	return nil
 }
 
-func (p *proposer) majority() int {
+func (p *Proposer) majority() int {
 	return len(p.acceptors) / 2 + 1
 }
 
-func (p *proposer) majorityReached() bool {
-	count := 0
-	for _, ok := range p.acceptors {
-		if ok {
-			count++
-		}
-	}
-	if count >= p.majority() {
-		return true
-	}
-	return false
-}
-
-// proposal number = (round number, serverID)
-func (p *proposer) proposalNumber() int {
-	return p.round<< 16 | p.id
+// 提案编号 = (轮次, 服务器 id)
+func (p *Proposer) proposalNumber() int {
+	return p.round << 16 | p.id
 }
