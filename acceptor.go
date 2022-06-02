@@ -12,7 +12,7 @@ type Acceptor struct {
 	// 服务器 id
 	id int
 	// 接受者承诺的提案编号，如果为 0 表示接受者没有收到过任何 Prepare 消息
-	promiseNumber int
+	minProposal int
 	// 接受者已接受的提案编号，如果为 0 表示没有接受任何提案
 	acceptedNumber int
 	// 接受者已接受的提案的值，如果没有接受任何提案则为 nil
@@ -32,8 +32,8 @@ func newAcceptor(id int, learners []int) *Acceptor {
 }
 
 func (a *Acceptor) Prepare(args *MsgArgs, reply *MsgReply) error {
-	if args.Number > a.promiseNumber {
-		a.promiseNumber = args.Number
+	if args.Number > a.minProposal {
+		a.minProposal = args.Number
 		reply.Number = a.acceptedNumber
 		reply.Value = a.acceptedValue
 		reply.Ok = true
@@ -44,8 +44,8 @@ func (a *Acceptor) Prepare(args *MsgArgs, reply *MsgReply) error {
 }
 
 func (a *Acceptor) Accept(args *MsgArgs, reply *MsgReply) error {
-	if args.Number >= a.promiseNumber {
-		a.promiseNumber = args.Number
+	if args.Number >= a.minProposal {
+		a.minProposal = args.Number
 		a.acceptedNumber = args.Number
 		a.acceptedValue = args.Value
 		reply.Ok = true
